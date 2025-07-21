@@ -53,7 +53,7 @@ def get_date_range(period, max_date):
     else:
         return None
 
-def load_strava_data(parquet_path="data/strava_activities_20250721_113146.parquet"):
+def load_strava_data(parquet_path="data/strava_activities_latest.parquet"):
     """
     Load and process Strava data from Parquet file.
     
