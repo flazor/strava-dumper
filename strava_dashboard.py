@@ -14,6 +14,7 @@ from plotly.subplots import make_subplots
 from pathlib import Path
 import logging
 from datetime import datetime, timedelta
+import numpy as np
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -214,6 +215,154 @@ def create_miles_chart(daily_data, activity_type):
     
     return fig
 
+def create_calendar_heatmap(daily_data, activity_type):
+    """
+    Create calendar heatmap with separate traces for each year.
+    
+    Args:
+        daily_data (pd.DataFrame): Daily miles data
+        activity_type (str): Selected activity type
+        
+    Returns:
+        plotly figure: Heatmap chart object
+    """
+    if daily_data.empty:
+        return None
+    
+    # Filter to data with non-zero activities for start date
+    non_zero_data = daily_data[daily_data['miles'] > 0]
+    if non_zero_data.empty:
+        return None
+    
+    start_date = non_zero_data['date'].min()
+    end_date = daily_data['date'].max()
+    
+    # Create a copy for processing
+    heatmap_data = daily_data[(daily_data['date'] >= start_date) & (daily_data['date'] <= end_date)].copy()
+    
+    # Add calendar fields
+    heatmap_data['year'] = heatmap_data['date'].dt.year
+    heatmap_data['week_of_year'] = heatmap_data['date'].dt.isocalendar().week
+    heatmap_data['day_of_week'] = heatmap_data['date'].dt.day_of_week  # Monday=0, Sunday=6
+    
+    # Get unique years (sorted descending so most recent years appear first)
+    years = sorted(heatmap_data['year'].unique(), reverse=True)
+    
+    # Find the global week range to align all years
+    all_weeks = sorted(heatmap_data['week_of_year'].unique())
+    min_week = min(all_weeks)
+    max_week = max(all_weeks)
+    week_range = list(range(min_week, max_week + 1))
+    
+    # Create subplot structure - no subplot titles since we'll add year labels on y-axis
+    fig = make_subplots(
+        rows=len(years), 
+        cols=1,
+        vertical_spacing=0.01
+    )
+    
+    # Day of week labels (Monday=0 to Sunday=6)
+    day_labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    
+    for i, year in enumerate(years):
+        year_data = heatmap_data[heatmap_data['year'] == year].copy()
+        
+        # Create pivot table for heatmap with consistent week range
+        pivot_data = year_data.pivot_table(
+            values='miles', 
+            index='day_of_week', 
+            columns='week_of_year', 
+            fill_value=0
+        )
+        
+        # Ensure all days of week are present
+        for day in range(7):
+            if day not in pivot_data.index:
+                pivot_data.loc[day] = 0
+        
+        # Ensure all weeks are present for alignment
+        for week in week_range:
+            if week not in pivot_data.columns:
+                pivot_data[week] = 0
+        
+        # Sort by index and columns to ensure proper ordering
+        pivot_data = pivot_data.sort_index()
+        pivot_data = pivot_data.reindex(columns=sorted(pivot_data.columns))
+        
+        # Create display values for color mapping (clamp to 20 for color scale)
+        pivot_data_display = pivot_data.clip(upper=20.0)
+        
+        # Create hover text with dates and actual miles
+        hover_text = []
+        for day_idx in pivot_data.index:
+            day_row = []
+            for week_num in pivot_data.columns:
+                # Find the actual date for this week/day combination
+                matching_dates = year_data[
+                    (year_data['week_of_year'] == week_num) & 
+                    (year_data['day_of_week'] == day_idx)
+                ]['date']
+                
+                if len(matching_dates) > 0:
+                    actual_date = matching_dates.iloc[0].strftime('%Y-%m-%d')
+                else:
+                    # Calculate approximate date for week/day
+                    import datetime
+                    jan_1 = datetime.date(year, 1, 1)
+                    week_1_monday = jan_1 - datetime.timedelta(days=jan_1.weekday())
+                    target_date = week_1_monday + datetime.timedelta(weeks=week_num-1, days=day_idx)
+                    actual_date = target_date.strftime('%Y-%m-%d')
+                
+                actual_mile_value = pivot_data.loc[day_idx, week_num]
+                day_row.append(f"{actual_date}<br>{day_labels[day_idx]}<br>Miles: {actual_mile_value:.1f}")
+            hover_text.append(day_row)
+        
+        # Create heatmap for this year
+        fig.add_trace(
+            go.Heatmap(
+                z=pivot_data_display.values,
+                x=pivot_data.columns,
+                y=[day_labels[j] for j in pivot_data.index],
+                colorscale='thermal',
+                zmin=0,
+                zmax=20.0,
+                colorbar=dict(
+                    title="Miles"
+                ) if i == 0 else None,
+                showscale=(i == 0),  # Only show colorbar for first trace
+                # Use hover text with full information
+                text=hover_text,
+                hovertemplate='%{text}<extra></extra>',
+                name=f"{year}"
+            ),
+            row=i+1, col=1
+        )
+    
+    # Update layout
+    fig.update_layout(
+        title=f'Calendar Heatmap - {activity_type}',
+        height=120 * len(years),
+        template='plotly_white',
+        margin=dict(l=80)  # Increase left margin for year labels
+    )
+    
+    # Update axes for all subplots
+    for i in range(len(years)):
+        # Only show x-axis title on bottom subplot
+        fig.update_xaxes(
+            title="Week of Year" if i == len(years)-1 else "",
+            showticklabels=(i == len(years)-1),  # Only show tick labels on bottom
+            row=i+1, col=1
+        )
+        # Add year label on the left and show day labels
+        fig.update_yaxes(
+            title=dict(text=f"{years[i]}", font=dict(size=14)),
+            side='left',
+            row=i+1, col=1
+        )
+    
+    return fig
+
 def main():
     """Main dashboard function."""
     
@@ -266,64 +415,81 @@ def main():
     # Process data for selected activity type
     daily_data = process_daily_miles(df, selected_type)
     
-    # Date range selector
-    if not daily_data.empty:
-        st.subheader("Date Range")
+    # Create tabs for different views
+    tab1, tab2 = st.tabs(["Timeline Analysis", "Calendar Heatmap"])
+    
+    with tab1:
+        # Date range selector
+        if not daily_data.empty:
+            st.subheader("Date Range")
+            
+            # Create columns for date range buttons
+            date_ranges = ['1W', '1M', '3M', '6M', 'YTD', '1Y', '2Y', '5Y', '10Y', 'ALL']
+            cols = st.columns(len(date_ranges))
+            
+            # Initialize session state for selected range - default to '3M'
+            if 'selected_range' not in st.session_state:
+                st.session_state.selected_range = '3M'
+            
+            # Create buttons for each date range
+            for i, period in enumerate(date_ranges):
+                with cols[i]:
+                    if st.button(period, key=f"btn_{period}"):
+                        st.session_state.selected_range = period
+            
+            # Filter data based on selected date range
+            max_date = daily_data['date'].max()
+            start_date = get_date_range(st.session_state.selected_range, max_date)
+            
+            if start_date:
+                filtered_data = daily_data[daily_data['date'] >= start_date].copy()
+                range_label = st.session_state.selected_range
+            else:
+                filtered_data = daily_data.copy()
+                range_label = 'ALL'
+            
+            st.write(f"**Showing:** {range_label}")
         
-        # Create columns for date range buttons
-        date_ranges = ['1W', '1M', '3M', '6M', 'YTD', '1Y', '2Y', '5Y', '10Y', 'ALL']
-        cols = st.columns(len(date_ranges))
+        # Create and display the chart
+        if not daily_data.empty and not filtered_data.empty:
+            fig = create_miles_chart(filtered_data, f"{selected_type} ({range_label})")
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Display some summary stats for the filtered data
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                days_with_activity = len(filtered_data[filtered_data['miles'] > 0])
+                st.metric("Days with Activity", days_with_activity)
+            
+            with col2:
+                avg_daily = filtered_data['miles'].mean()
+                st.metric("Avg Miles/Day", f"{avg_daily:.1f}")
+            
+            with col3:
+                max_daily = filtered_data['miles'].max()
+                st.metric("Max Miles/Day", f"{max_daily:.1f}")
+            
+            with col4:
+                filtered_total = filtered_data['miles'].sum()
+                st.metric(f"Total Miles ({range_label})", f"{filtered_total:.1f}")
         
-        # Initialize session state for selected range - default to '3M'
-        if 'selected_range' not in st.session_state:
-            st.session_state.selected_range = '3M'
-        
-        # Create buttons for each date range
-        for i, period in enumerate(date_ranges):
-            with cols[i]:
-                if st.button(period, key=f"btn_{period}"):
-                    st.session_state.selected_range = period
-        
-        # Filter data based on selected date range
-        max_date = daily_data['date'].max()
-        start_date = get_date_range(st.session_state.selected_range, max_date)
-        
-        if start_date:
-            filtered_data = daily_data[daily_data['date'] >= start_date].copy()
-            range_label = st.session_state.selected_range
         else:
-            filtered_data = daily_data.copy()
-            range_label = 'ALL'
-        
-        st.write(f"**Showing:** {range_label}")
+            st.warning(f"No activities found for {selected_type}")
     
-    # Create and display the chart
-    if not daily_data.empty and not filtered_data.empty:
-        fig = create_miles_chart(filtered_data, f"{selected_type} ({range_label})")
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
+    with tab2:
+        # Calendar Heatmap Tab
+        st.subheader("Calendar Heatmap")
         
-        # Display some summary stats for the filtered data
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            days_with_activity = len(filtered_data[filtered_data['miles'] > 0])
-            st.metric("Days with Activity", days_with_activity)
-        
-        with col2:
-            avg_daily = filtered_data['miles'].mean()
-            st.metric("Avg Miles/Day", f"{avg_daily:.1f}")
-        
-        with col3:
-            max_daily = filtered_data['miles'].max()
-            st.metric("Max Miles/Day", f"{max_daily:.1f}")
-        
-        with col4:
-            filtered_total = filtered_data['miles'].sum()
-            st.metric(f"Total Miles ({range_label})", f"{filtered_total:.1f}")
-    
-    else:
-        st.warning(f"No activities found for {selected_type}")
+        if not daily_data.empty:
+            heatmap_fig = create_calendar_heatmap(daily_data, selected_type)
+            if heatmap_fig:
+                st.plotly_chart(heatmap_fig, use_container_width=True)
+            else:
+                st.warning("No activity data available for heatmap")
+        else:
+            st.warning(f"No activities found for {selected_type}")
 
 if __name__ == "__main__":
     main()
